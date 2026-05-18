@@ -1,0 +1,156 @@
+---
+title: "Modeling Tornado Injury Severity with Environmental and Spatial Predictors: A Multiclass Machine Learning Approach"
+author: "Vanessa Zepeda"
+output:
+  pdf_document: 
+    number_sections: true
+    latex_engine: xelatex
+  html_document: default
+  Table: Caption {#label}
+header-includes:
+  - \usepackage{float}
+---
+
+# Introduction
+
+Tornadoes cause significant destruction in the United States each year, yet predicting their human impact remains a challenge. While tornado forecasting has been the subject of extensive research and technological improvement, comparatively less work has focused on modeling their human impacts or understanding the conditions that lead to injury and loss. Understanding these relationships is important for emergency response planning, resource allocation, and recovery. In particular, identifying the conditions under which injuries are more likely to occur can help agencies preposition medical, transportation, and shelting resources in areas of greater risk.
+
+The goal of this study is to predict tornado injury severity using environmental, spatial and temporal features derived from storm reports, population and land cover data. Rather than modeling the raw number of injuries, which would be more difficult to model directly, the outcome variable is categorized into three severity levels: no injures, minor injuries (1-9), and severe injury events (10 or more). This framing allows the problem to be addressed as a multiclass classification task, allowing for machine learning methods to be applied.
+
+The objective of this project is to determine whether environmental and spatial features contribute to predicting injury outcomes and to determine if a trained model can reliably distinguish between low risk and high risk tornado events. Although the model is not intended for real time forecasting, it provides insight into the factors that strongly influence tornado injury severity and demonstrates how modeling can inform planning efforts.
+
+# Data Construction
+
+## Tornado Event Data
+
+The primary dataset used in this analysis is the historical tornado records obtained from NOAA's Storm Events Database, which provides information on tornado attributes such as location, date, time, path length, path width, and reported injuries. The raw dataset includes tornadoes from 1950 to 2024; however, modern population and landcover data were only available for 2010 and 2020. To ensure consistency between environmental factors and available tornado data, the analysis was limited to events that occured from 2007 and onward.
+
+Each tornado record includes both a starting and ending latitude longitude pair. For spatial analysis, the starting point was treated as the reference location. Injury counts were categorized into three classes to serve as the target variable: 0 for no injuries, 1 for minor injuries (1-9), and 2 for major injury events (10 or more). Categorizing injury counts in this way helped stabilize the response variable and allowed the classification model to capture meaningful patterns without being influenced by extreme outliers.
+
+## Population Density Integration
+
+Accurately estimating how population density influences tornado impacts is challenging because counties vary greatly in size. Although smaller scale population data at the census block level are available, their size and retrieval time made them impractical for this analysis. A single tornado may affect only a small portion of a large rural county, so raw county population totals do not necessarily represent the density near the tornado’s path. To address this, population density was calculated using U.S. Census Bureau decennial census counts for 2010 and 2020 along with corresponding county land area. These data were merged with county shapefiles from the same census years, allowing land area (ALAND) to be used to compute residents per square mile.
+
+Tornado events were matched to population density according to the year of occurrence. Events from 2007–2014 were assigned 2010 population density values, and events from 2015–2024 were assigned 2020 values. This approach ensured that each tornado was linked to the most relevant census data while avoiding the assumption of a constant population across decades.
+
+Only tornadoes occurring in mainland United States (excluding Alaska and Hawaii) were retained. After merging, each tornado record contained a population density estimate associated with the county in which the tornado originated.
+
+## Land Cover Extraction
+
+Variation in land cover can affect tornado injury outcomes by altering the built environment, vegetation density, and population distribution near the tornado path. To capture environmental conditions surrounding each tornado, land cover data was obtained from the National Land Cover Database (NLCD) for 2011 and 2021. The NLCD classifies land cover into 16 primary types, including developed areas (low, medium, and high intensity), forests (deciduous, evergreen, mixed), shrublands, grasslands, wetlands, and open water. Since the NLCD is raster based, the tornado start coordinates were converted into spatial features and projected into the same coordinate system as the land cover rasters.
+
+A 500 meter buffer was created around each tornado start point to approximate the immediate surroundings impacted by the tornado. For each buffer, the majority land cover class was extracted using exact raster extraction methods, providing a single dominant land cover type for each tornado. Tornadoes occurring from 2007–2014 were paired with NLCD 2011, while those from 2015–2024 were paired with NLCD 2021. The final land cover values were joined back to the tornado dataset, resulting in each record having a categorical variable representing the dominant land cover type near the tornado origin.
+
+## Final Dataset Preperation
+
+After merging tornado attributes, population density, and land cover values, the dataset was filtered to include only complete cases. The final cleaned dataset included variables describing tornado characteristics (width, length, time, month, location), spatial context (population density), environmental conditions (majority land cover class), and the injury severity class. These variables were written to a CSV file and later used for modeling.
+
+The resulting dataset provides a structured integration of tornado attributes, environmental context, and population factors, offering a comprehensive foundation for modeling and predicting injury severity outcomes.
+
+# Methodology
+
+## Overview of Modeling Approach
+
+The injury severity prediction problem is treated as a multiclass classification task with three ordered categories. Extreme Gradient Boosting (XGBoost) was selected as the modeling technique because of its efficient implementation of gradient boosted decision trees. XGBoost builds an ensemble of sequential trees, where each new tree attempts to correct the errors of the previous ones, optimizing a differentiable loss function. This approach allows it to capture complex nonlinear relationships and interactions among predictors that traditional linear models might miss. Additionally, XGBoost includes built-in regularization, which helps prevent overfitting, and it can naturally handle multicollinearity among features. Another advantage is its support for weighting classes, which is particularly important in this study given the large class imbalance in the injury severity distribution.
+
+Models were trained using a 70–30 train–test split, ensuring that the target class proportions were preserved across both sets through stratified sampling. Hyperparameters such as learning rate (eta), maximum tree depth, number of boosting rounds (nrounds), gamma, subsampling fraction, minimum child weight, and column subsampling fraction, were tuned using a grid search with three-fold cross-validation. The Kappa statistic was used as the performance metric to account for class imbalance. Kappa measures the agreement between predicted and observed classifications while adjusting for the agreement that could occur by chance, providing a better evaluation metric than overall accuracy when class distributions are uneven.
+
+## Feature Engineering
+
+To incorporate temporal effects, tornado start times were converted into cyclical representations. Hour of day was transformed using sine and cosine encodings to appropriately model the cyclic nature of daily time. Similarly, month of year was encoded using sine and cosine transformations. This prevented discontinuities between values such as 23:00 and 00:00 or December and January.
+
+Land cover variables, originally stored as categorical integers, were converted into one hot encoded dummy variables. Geometry fields and other unused raw attributes were removed during preprocessing to simplify and optimize the feature matrix. All resulting predictor columns were numeric, allowing the dataset to be passed directly into XGBoost.
+
+## Addressing Class Imbalance
+
+The targer variable is largely imbalanced, with no injury tornadoes comprising the majority of cases. Without addressing this, XGBoost would favor predicting the majority class, producing misleading overall accuracy while performing poorly on tornadoes that do cause injuries. While there are many approaches to addressing class imbalance, including oversampling the minority classes, undersampling the majority class, or generating synthetic examples, class weighing was applied because it directly adjusts the influence of each instance during training and integrates with XGBoost.
+
+Therefore, two models were trained: a baseline model without class weighting and a weighted model in which each class received an inverse-frequency weight based on the training set distribution. Weights were computed so that rare classes received proportionally greater influence during trainin, and were passed directly into the XGBoost model This approach allows the model to penalize misclassification of injury-causing tornadoes more heavily, improving predictive performance for minority classes.
+
+```{=tex}
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.6\textwidth]{figures/class_imb.png}
+\caption{Distribution of injury severity classes in the training dataset, illustrating the high prevalence of no injury tornadoes.}
+\label{fig:class_dist}
+\end{figure}
+```
+As shown in Figure \ref{fig:class_dist}, the imbalance in the training set is pronounced, highlighting the importance of applying class weights.
+
+## Model Training and Evaluation
+
+Both baseline and weighted models were trained on the full training set using the optimized hyperparameters identified via grid search and three-fold cross-validation (see Overview of Modeling Approach). Model performance was evaluated on the test set using confusion matrices, class specific sensitivity and specificity, balanced accuracy, and other multiclass metrics. SHAP (shapley additive explanations) values were computed to quantify feature contributions and interpret the influence of tornado, environmental, and spatial variables on predicted injury severity. Comparisons between baseline and weighted models allowed assessment of how class weighting affected predictive performance and feature importance. SHAP assigns each feature a value representing its average contribution to the prediction across all possible combinations of features. Positive SHAP values indicate that a feature increases the likelihood of a higher injury severity class, while negative values indicate a decrease. This method provides consistent and interpretable insights into which tornado, environmental, and spatial factors most strongly influence model predictions.
+
+# Results
+
+## Baseline Model Performance
+
+The baseline XGBoost model, trained without class weights, achieved an overall accuracy of 94.42% (95% CI: 93.87–94.93). Although this value initially appears strong, accuracy is not an appropriate measure in the context of large class imbalance, given that more than 92% of all tornadoes in the dataset resulted in no injuries. A more informative measure, Cohen’s Kappa, was 0.4752, indicating only a moderate ability to classify injury severity beyond what would be expected by chance. The confusion matrix (Figure \ref{fig:b_con_mat}) illustrates this behavior clearly. The model identified Class 0 (no injury) cases almost perfectly, correctly classifying 6,887 out of 6,913 events, corresponding to a sensitivity of 0.9961. Performance declined sharply for Class 1 (1–9 injuries), with only 23.7% of these events correctly classified. Despite Class 1 being more common than Class 2, the model struggled to distinguish minor injury tornadoes from the much larger pool of non injury events, suggesting that these two classes share overlapping environmental characteristics. For the most severe injury events (Class 2), the model performed moderately well, achieving a sensitivity of 0.6571 and a high positive predictive value of 0.9293. The macro-averaged F1 score was 0.7017, reflecting strong performance for Class 0 and Class 2 but considerably weaker recognition of Class 1.
+
+```{=tex}
+\begin{figure}[h]
+    \centering
+    \begin{minipage}{0.45\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/b_con_mat.png}
+        \caption{Baseline Model Confusion Matrix}
+        \label{fig:b_con_mat}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.45\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/shap_unw.png}
+        \caption{SHAP Plots for Baseline Model}
+        \label{fig:shap_uw}
+    \end{minipage}
+\end{figure}
+```
+To better understand how the model arrived at its classifications, SHAP values were examined (Figure \ref{fig:shap_uw}). The strongest predictors included tornado path length, path width, starting latitude and longitude, population density, and cyclic time-of-day indicators (sine and cosine transformations). These predictors align well with physical intuition: tornadoes that are longer, wider, and intersect populated areas are more likely to produce injuries. The SHAP plots therefore confirm that the model is prioritizing relevant meteorological and spatial structure even if performance remains uneven across classes.
+
+## Weighted Model Performance
+
+To address the severe imbalance among the three injury classes, a second model was trained using inverse-frequency class weights. The weighted model achieved a slightly lower overall accuracy of 94.03%, again influenced by the overwhelming proportion of Class 0 events. Cohen’s Kappa declined to 0.4383, indicating that incorporating class weights did not improve the model’s ability to correctly classify tornado injury severity. The confusion matrix for this model (Figure \ref{fig:w_con_mat}) shows that performance for Class 1 degraded further, with sensitivity dropping to 20.2% and precision falling to 0.6894. This suggests increased difficulty in distinguishing the minor injury class from the dominant non injury class. In contrast, performance for Class 2 remained comparable to the baseline model, with a sensitivity of 0.6429 and a positive predictive value of 0.8738. The macro-averaged F1 score decreased to 0.6742, reflecting a general decline in the model’s overall balance between precision and recall.
+
+```{=tex}
+\begin{figure}[h]
+    \centering
+    \begin{minipage}{0.45\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/w_con_mat.png}
+        \caption{Weighted Model Confusion Matrix}
+        \label{fig:w_con_mat}
+    \end{minipage}
+    \hfill
+    \begin{minipage}{0.45\textwidth}
+        \centering
+        \includegraphics[width=\linewidth]{figures/shap_w.png}
+        \caption{SHAP Plots for Weighted Model}
+        \label{fig:shap_w}
+    \end{minipage}
+\end{figure}
+```
+The SHAP results for the weighted model (Figure \ref{fig:shap_w}) remained nearly identical to those of the baseline model, indicating that class weighting influenced prediction outcomes but not the underlying ordering of feature importance. Tornado length, width, spatial position, population density, and time-of-day effects continued to drive classification behavior. This stability suggests that environmental and spatial factors contribute consistently regardless of imbalance treatment, but the model’s ability to separate Classes 0 and 1 remains limited.
+
+## Did the Model Improve? (Baseline vs Weighted)
+
+A comparison of the two models indicates that incorporating class weights did not lead to measurable improvement. The weighted model produced lower Kappa, lower macro-F1, and reduced sensitivity for Class 1. Although Class 2 performance remained relatively stable across models, the main limitation in this classification task is the model struggles to distinguish minor injury tornado events from those producing no injuries. Both models reveal that Classes 0 and 1 share highly overlapping feature distributions, causing the classifier to default toward predicting no injury outcomes when uncertainty is high. Introducing class weights increased the penalty for misclassifying injury cases but did not reduce this overlap. Instead, the model appeared to shift toward misclassifying more borderline cases without improving its recognition of true injury events.
+
+Based on these results, the baseline model remains the stronger of the two. Its higher macro-F1 score and more stable classification behavior across classes make it better suited for exploratory risk analysis. Because the weighted model did not enhance the ability to detect injury events, future modeling efforts may require different approaches such as reparameterizing the injury classes, incorporating additional meteorological variables, or using specialized methods to better capture the differences between non injury and minor injury tornadoes.
+
+# Discussion
+
+The results of this study show that environmental and spatial variables contain predictive information about tornado injury severity, but the model’s performance greatly varies across the three severity classes. The XGBoost classifier performs very well for Class 0 (no injuries), achieving extremely high sensitivity and positive predictive value. This indicates that the model is highly reliable in identifying tornadoes that are unlikely to cause injuries. This behavior is expected, given that the majority of tornado events in the dataset fall into this category and display consistent environmental patterns.
+
+In contrast, the model struggles to accurately classify Class 1 events (minor injury cases) despite this class being more common than Class 2. Both the baseline and weighted models show low sensitivity for Class 1 (0.237 for baseline; 0.202 for weighted), indicating that most minor injury events are misclassified as Class 0. Many Class 1 events have environmental characteristics similar to no injury tornadoes (shorter path lengths, narrower widths), making them harder for the model to distinguish. Additionally, minor injury counts are affected by differences in reporting, how many people were exposed, and random chance, making them less consistent than severe injury cases.
+
+Class 2 (severe injury events) demonstrates moderately strong detection, with sensitivity above 0.64 in both models. The SHAP results help explain this: tornadoes with larger path lengths and widths, as well as those occurring near more populated areas, receive strong positive SHAP contributions that push predictions toward the severe class. These results show that environmental and spatial factors can help identify tornadoes that are more likely to cause injuries.
+
+A noticeable insight is that the weighted model did not improve overall performance. Although class weighting is normally used to enhance minority class detection, the weighted model slightly decreased the macro F1 score (from 0.702 to 0.674) and lowered the Kappa statistic. This indicates that the misclassification errors were caused less by class imbalance and more by the overlap between classes, especially between Class 0 and Class 1. Increasing the weight of minority classes amplified noise in ambiguous cases, leading to more misclassifications without improving separation.
+
+Overall, the results show that environmental and spatial factors help distinguish injury free events from high severity ones, but they are not enough to fully explain the conditions leading to minor injuries.
+
+# Limitations and Conclusion
+While this study demonstrates that environmental, spatial and temporal features can predict tornado injury severity with reasonable accuracy, several limitations remain. The dataset does not include social or structural factors such as housing quality, shelter availability, or warning times which all likely influence tornado outcomes and limit model performance, especially for minor injuries. Potential reporting inconsistencies in injury counts add further noise, and despite applying class weights, the overlap between classes reduces predictive accuracy.
+
+While not suitable for real time forecasting, the results can help inform emergency planning and indicate where additional data could improve risk assessment. Future work incorporating the variables mentioned may allow more precise prediction of minor injury event cases.
+

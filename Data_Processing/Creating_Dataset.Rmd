@@ -1,0 +1,187 @@
+---
+title: "Creating The Data Set"
+author: "Vanessa Zepeda"
+output: html_document
+---
+
+
+Predicting tornado injury severity using environmental and spatial factors
+
+
+
+- purpose: this will aid in aid efforts after these kinds of events 
+- end product: show a map of where most injuries are likely to occur
+  - maybe add an interactive feature where user can input something like season, general location, and other variables and the map will print out the general area of where the most injuries are liekyl to occur (where aid should be focused)
+- target variable will be the number of injuries 
+  - about this variable: 
+    - will split this column into 3 different classes: 0 for no injuries; 1 for 1-9 injuries; 2 for more than 10 injuries 
+    - class imbalance exists in our target variable, if this is not addressed, model will favor majority class
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(ggplot2)
+library(dplyr)
+library(tidycensus)
+library(sf)
+library(tidyr)
+library(terra)
+library(exactextractr)
+library(tidyverse)
+```
+
+```{r}
+census_api_key("8ea35b87adead36b484bdf1d112f496a5751f59c", install=TRUE, overwrite=TRUE)
+```
+issue with taking county data, some counties are big; tornado could happen on one end of the county and not the other; but it would not be accurately shown because the county is big with a huge population 
+
+- population density  
+- divivde: population by area  (obtain from us census )
+```{r}
+# Read in tornado data
+tornado = read.csv("~/Statistics_Practicum_2025/Final_Project/Data_Processing/tornadoes/1950-2024_actual_tornadoes.csv")
+
+tornado = tornado %>%
+  mutate(
+    stf = as.numeric(stf),
+    f1 = as.numeric(f1),
+    f2 = as.numeric(f2),
+    f3 = as.numeric(f3),
+    f4 = as.numeric(f4)
+  )
+
+tornado_expanded = tornado %>%
+  mutate(
+    f1 = ifelse(f1 == 0, NA, f1),
+    f2 = ifelse(f2 == 0, NA, f2),
+    f3 = ifelse(f3 == 0, NA, f3),
+    f4 = ifelse(f4 == 0, NA, f4)
+  ) %>%
+  pivot_longer(cols = c(f1, f2, f3, f4),
+               names_to = "fips_num",
+               values_to = "county_fips",
+               values_drop_na = TRUE) %>%
+  mutate(
+    county_fips = sprintf("%03d", county_fips),
+    state_fips  = sprintf("%02d", stf),
+    fips = paste0(state_fips, county_fips)
+  )
+
+tornado_pop = tornado_expanded %>%
+  filter(yr >= 2007) %>%
+  mutate(inj_class = case_when(
+    inj == 0 ~ 0,
+    inj >= 10 ~ 2,
+    TRUE ~ 1
+    )) %>%
+  mutate(pop_year = case_when(
+    yr >= 2007 & yr <= 2014 ~ 2010,
+    yr >= 2015 & yr <= 2024 ~ 2020
+  )) %>%
+  select(om, yr, pop_year, mo, dy, time, inj, slat, slon, elat, elon, len, wid, fips, inj_class, st)
+
+
+mainland_states = state.abb[!state.abb %in% c("AK", "HI")]
+
+tornado_pop = tornado_pop[tornado_pop$st %in% mainland_states, ]
+```
+
+```{r}
+# Read in population data
+
+options(tigris_use_cache = TRUE)
+
+# 2020 population + area 
+county_pop_2020 = get_decennial(
+  geography = "county",
+  variables = c(pop = "P1_001N"),
+  year = 2020,
+  sumfile = "pl",
+  output = "wide"
+)
+
+county_shp_2020 = tigris::counties(year = 2020, cb = FALSE)
+
+county_shp_pop_2020 = county_shp_2020 %>%
+  left_join(county_pop_2020 %>% select(GEOID, pop), by = "GEOID") %>%
+  mutate(
+    land_sqmi = ALAND / 2589990,
+    pop_density = pop / land_sqmi,
+    fips = GEOID,
+    pop_year = 2020
+    ) %>% select(fips, pop_density, pop_year)
+
+
+# 2010 population + area 
+county_pop_2010 = get_decennial(
+  geography = "county",
+  variables = c(pop = "P001001"),
+  year = 2010,
+  sumfile = "pl",
+  output = "wide"
+)
+
+counties_2010 = tigris::counties(year = 2010, cb = FALSE) %>%
+  rename(
+    GEOID = GEOID10,
+    ALAND = ALAND10,
+    AWATER = AWATER10
+    )
+
+county_shp_pop_2010 = counties_2010 %>%
+  left_join(county_pop_2010 %>% select(GEOID, pop), by = "GEOID") %>%
+  mutate(
+    land_sqmi = ALAND / 2589990,
+    pop_density = pop / land_sqmi,
+    fips = GEOID,
+    pop_year = 2010
+    ) %>% select(fips, pop_density, pop_year)
+
+```
+```{r}
+# combine datasets and append onto tornado data by fips and pop_year: 
+census_combined = bind_rows(county_shp_pop_2020, county_shp_pop_2010)
+tornado_pop = tornado_pop %>%
+  left_join(census_combined, by = c("fips", "pop_year"))
+tornado_pop
+```
+
+
+```{r}
+# load in land coverage data
+nlcd11 = rast("~/Statistics_Practicum_2025/Final_Project/Data_Processing/land_coverage/Annual_NLCD_LndCov_2011_CU_C1V1/Annual_NLCD_LndCov_2011_CU_C1V1.tif")
+
+nlcd21 = rast("~/Statistics_Practicum_2025/Final_Project/Data_Processing/land_coverage/Annual_NLCD_LndCov_2021_CU_C1V1/Annual_NLCD_LndCov_2021_CU_C1V1.tif")
+
+tornado_sf = st_as_sf(
+  tornado_pop,
+  coords = c("slon", "slat"),
+  crs = 4326,
+  remove = FALSE
+)
+
+tornado_proj = st_transform(tornado_sf, crs(nlcd11))
+
+tornado_proj$buffer = st_buffer(tornado_proj, dist = 500)
+
+tp11 = tornado_proj %>% filter(yr >= 2007 & yr <= 2014)
+tp21 = tornado_proj %>% filter(yr >= 2015 & yr <= 2024)
+
+
+tp11$landcover_majority500 = exact_extract(nlcd11, tp11$buffer, 'mode')
+tp21$landcover_majority500 = exact_extract(nlcd21, tp21$buffer, 'mode')
+
+tornado_lc = bind_rows(tp11,tp21)
+```
+
+```{r}
+tornado_cleaned = tornado_lc %>% 
+  select(om, yr, mo, dy, time, slat, slon, elat, elon, len, wid, fips, pop_density, landcover_majority500, inj_class) %>% select(-geometry)
+tornado_cleaned
+```
+
+```{r}
+write.csv(tornado_cleaned, "~/Statistics_Practicum_2025/Final_Project/Data_Processing/tornado_final_dataset.csv", row.names=FALSE)
+```
+
+
+

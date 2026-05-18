@@ -1,0 +1,362 @@
+---
+title: "Model_Building"
+author: "Vanessa Zepeda"
+output: html_document
+---
+```{r}
+library(fastDummies)
+library(tidyverse)
+library(xgboost)
+library(caret)
+library(lubridate)
+```
+
+
+```{r}
+# load in the dataset
+df_to_clean = read_csv("~/Statistics_Practicum_2025/Final_Project/Data_Processing/tornado_final_dataset.csv")
+df_to_clean
+```
+
+# Cleaning the Data
+```{r}
+# check for null values
+sum(is.na(df_to_clean)) # 24 total (in population and landcover columns)
+df_to_clean[!complete.cases(df_to_clean), ] # most are in Hawaii/Caribbean
+df_to_clean = na.omit(df_to_clean) # drop null rows, no more nulls!
+
+# categorical data to dummy
+df_to_clean = fastDummies::dummy_cols(df_to_clean,
+                                      select_columns = "landcover_majority500",
+                                      remove_selected_columns = TRUE,
+                                      remove_first_dummy = TRUE)
+
+# convert time variables into cyclical values
+df_to_clean = df_to_clean %>%
+  mutate(
+    hour = hour(time),
+    time_sin = sin(2 * pi * (hour/24)),
+    time_cos = cos(2 * pi * (hour/24)),
+    month_sin = sin(2 * pi * (mo/12)),
+    month_cos = cos(2 * pi * (mo/12))
+  ) %>% select(-time, -mo, -hour)
+
+# landcover 
+df = df_to_clean %>% select(-geometry, -om, -fips, -elat, -elon, -yr, -dy)
+df
+```
+## Assessing Class Imbalance
+what method to choose?
+- over sampling
+- under sampling
+- class weights
+While the model is already robust when it comes to class imbalance, it is good practice to address the issue. Some common methods of addressing class imbalance are over sampling, which takes samples from the minority class. Another is under sampling, which removes samples from the majority class. And lastly, another is adding class weights, which we can use as the model supports this. But how do we choose the best approach?
+
+class weights dont fully address the problem, however the other methods we risk losing data. For example, if we oversample the minority set, we may introduce unecessary noise to the dataset, leading to an overfit of the minority class. On the otherhand, under sampling the majority class could lose to a loss of a lot of data (would need to match (or be close to) the smallest count), which is not ideal either. While incorporating class weights is not the most ideal, that can be said for any other type of method we choose
+```{r}
+# assess class imbalance 
+table(df$inj_class)
+prop.table(table(df$inj_class))
+```
+
+```{r}
+# for replicabiltiy
+set.seed(67)
+trainIndex = createDataPartition(df$inj_class, p = 0.7, list = FALSE)
+
+# split the data into test/train data sets
+dfTrain = df[trainIndex,]
+dfTest = df[-trainIndex,]
+
+# extract predictor and target variable(s)
+X_train = dfTrain %>% select(-inj_class)
+y_train = dfTrain$inj_class
+
+X_test = dfTest %>% select(-inj_class)  
+y_test = dfTest$inj_class
+
+# check dimensions
+dim(X_train)
+length(y_train)
+```
+
+# baseline model without adding weights
+While this is not a trustworthy model, we can see that the shap values make sense for what we can deduce intuitively;
+- tornadoes that are larger in width and length are likely to be more destructive, therefore cause more damage 
+
+1st round: 
+nrounds 100, max_depth 6, eta 0.3, gamma 0, colsample_bytree 0.8, min_child_weight 3, subsample 0.8
+kappa = 0.3912575
+ 
+2nd round: 
+nrounds 200, max_depth 6, eta 0.1, gamma 0.1, colsample_bytree 0.8, min_child_weight 3, subsample 0.8
+kappa = 0.3895329
+
+3rd round: 
+nrounds 200, max_depth 6, eta 0.1, gamma 0.1, colsample_bytree 0.8, min_child_weight 3, subsample 0.8
+kappa = 0.3895329
+
+4th round:
+nrounds 200, max_depth 6, eta 0.1, gamma 0.1, colsample_bytree 0.8, min_child_weight 3, subsample 0.8
+kappa = 0.3895329
+
+```{r}
+# Set up parameter grid
+xgb_grid <- expand.grid(
+  nrounds = c(50, 100),
+  max_depth = c(3, 6),
+  eta = c(0.05, 0.1, 0.3),
+  gamma = c(0, 1),
+  colsample_bytree = c(0.8),
+  min_child_weight = c(1, 3),
+  subsample = c(0.8)
+)
+
+# Cross-validation control
+train_control = trainControl(
+  method = "cv",
+  number = 3,
+  verboseIter = TRUE,
+)
+
+# Train NON-weighted model
+set.seed(67)
+xgb_tuned_nonweighted = train(
+  x = as.matrix(X_train),
+  y = as.factor(y_train),
+  trControl = train_control,
+  tuneGrid = xgb_grid,
+  method = "xgbTree",
+  metric = "Kappa"
+)
+
+# View best parameters
+xgb_tuned_nonweighted
+plot(xgb_tuned_nonweighted)
+best_params_nonweighted = xgb_tuned_nonweighted$bestTune
+best_params_nonweighted
+
+```
+
+
+```{r}
+## set params first
+params = list(objective = "multi:softmax",
+              eval_metric = "mlogloss",
+              num_class = 3,
+              eta = best_params_nonweighted$eta,
+              max_depth = best_params_nonweighted$max_depth,
+              gamma = best_params_nonweighted$gamma,
+              colsample_bytree = best_params_nonweighted$colsample_bytree,
+              min_child_weight = best_params_nonweighted$min_child_weight,
+              subsample = best_params_nonweighted$subsample
+)
+
+## create model
+baseline_model = xgboost(data = as.matrix(X_train),
+                         label = y_train,
+                         params = params,
+                         nrounds = best_params_nonweighted$nrounds,
+                         verbose = 1)
+```
+
+```{r}
+## features that push target to either severe class or weak class: 
+# if shap value is <0 injury severity is likely to be not that severe;
+# if shap value is >0 injury severity is likely to be mroe severe 
+xgb.plot.shap(model = baseline_model,
+              data = as.matrix(X_train),
+              top_n =4)
+
+## Model Performance
+# train model
+pred = predict(baseline_model, as.matrix(X_test))
+
+#error 
+mean(pred != y_test) # error is low, which is good BUT based on the accuracy score, which cannot be trusted
+
+# confusion matrix 
+cm_un = confusionMatrix(factor(pred), factor(y_test))
+```
+
+# model with weights added
+```{r}
+# compute class counts from the training set
+class_counts = table(y_train)
+class_counts
+
+# make weights inversely proportional to frequency
+max_count = max(class_counts)
+class_weights = as.numeric(max_count / class_counts)
+class_weights_named = setNames(class_weights, names(class_counts))
+
+class_weights_named
+
+# assign weights to each training row
+train_weights = class_weights_named[ as.character(y_train) ]
+train_weights
+```
+
+```{r}
+# Set up parameter grid
+xgb_grid = expand.grid(
+  nrounds = c(50, 100),
+  max_depth = c(3, 6),
+  eta = c(0.05, 0.1, 0.3),
+  gamma = c(0, 1),
+  colsample_bytree = c(0.8),
+  min_child_weight = c(1, 3),
+  subsample = c(0.8)
+)
+
+# Cross-validation control
+train_control = trainControl(
+  method = "cv",
+  number = 3,
+  verboseIter = TRUE,
+)
+
+# Train weighted model
+set.seed(67)
+xgb_tuned_weighted = train(
+  x = as.matrix(X_train),
+  y = as.factor(y_train),
+  weights = train_weights,
+  trControl = train_control,
+  tuneGrid = xgb_grid,
+  method = "xgbTree",
+  metric = "Kappa"
+)
+```
+
+```{r}
+# View best parameters
+xgb_tuned_weighted
+plot(xgb_tuned_weighted)
+best_params_weighted = xgb_tuned_weighted$bestTune
+best_params_weighted
+```
+
+
+```{r}
+# fit weighted XGBoost model
+
+## set params first
+params = list(objective = "multi:softmax",
+              eval_metric = "mlogloss",
+              num_class = 3,
+              eta = best_params_weighted$eta,
+              max_depth = best_params_weighted$max_depth,
+              gamma = best_params_weighted$gamma,
+              colsample_bytree = best_params_weighted$colsample_bytree,
+              min_child_weight = best_params_weighted$min_child_weight,
+              subsample = best_params_weighted$subsample
+)
+
+## create model
+weighted_model = xgboost(data = as.matrix(X_train),
+                         label = y_train,
+                         params = params,
+                         nrounds = best_params_weighted$nrounds,
+                         verbose = 1)
+
+```
+
+```{r}
+# SHAP plot for weighted model
+xgb.plot.shap(
+model = weighted_model,
+data = as.matrix(X_train),
+top_n = 4,
+n_col = 2
+)
+
+# Evaluate performance
+pred_weighted = predict(weighted_model, as.matrix(X_test))
+
+# confusion matrix
+cm = confusionMatrix(
+  factor(pred_weighted),
+  factor(y_test)
+)
+
+# misclassification rate
+mean(pred_weighted != y_test)
+```
+```{r}
+
+precision <- cm_un$byClass[,"Pos Pred Value"]
+recall    <- cm_un$byClass[,"Sensitivity"]
+
+F1 <- 2 * (precision * recall) / (precision + recall)
+F1_macro <- mean(F1, na.rm = TRUE)
+
+F1
+F1_macro
+```
+```{r}
+cm_df = as.data.frame(cm$table)
+colnames(cm_df) = c("Predicted", "Actual", "Freq")
+
+ggplot(cm_df, aes(x = Actual, y = Predicted, fill = Freq)) +
+  geom_tile() +
+  scale_fill_gradient(low = "lightblue", high = "steelblue") + 
+  geom_text(aes(label = Freq)) +
+  labs(title = "Weighted Model Confusion Matrix Heatmap") 
+```
+
+```{r}
+
+xgb.plot.shap(
+  model = weighted_model,
+  data = as.matrix(X_train),
+  top_n = 4,
+  n_col = 2
+)
+```
+
+
+```{r}
+ggplot(df, aes(x = factor(inj_class))) +
+  geom_bar(fill = "steelblue") +
+  labs(title = "Class Distribution of Injury Severity",
+       x = "Injury Class", y = "Count")
+
+```
+
+```{r}
+importance_matrix = xgb.importance(
+  model = weighted_model,
+  feature_names = colnames(X_train)
+)
+
+xgb.plot.importance(importance_matrix, top_n = 20)
+```
+
+```{r}
+df2 = df %>% mutate(hour = (atan2(time_sin, time_cos) * 24/(2*pi)) %% 24)
+
+ggplot(df2, aes(x = factor(inj_class), y = hour, fill = factor(inj_class))) +
+  geom_boxplot() +
+  labs(title = "Distribution of Tornado Occurrence Hour by Injury Severity",
+       x = "Injury Class", y = "Hour of Day")
+```
+
+
+```{r}
+df2 = df %>% mutate(month = (atan2(month_sin, month_cos) * 12/(2*pi)) %% 12)
+
+ggplot(df2, aes(x = month, fill = factor(inj_class))) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Seasonal Pattern by Injury Severity",
+       x = "Month", y = "Density")
+```
+
+```{r}
+
+ggplot(dfTest, aes(x = slon, y = slat, color = factor(pred_weighted))) +
+  geom_point(alpha = 0.4) +
+  labs(title = "Predicted Injury Severity (Spatial Scatter)",
+       x = "Longitude", y = "Latitude")
+```
+
